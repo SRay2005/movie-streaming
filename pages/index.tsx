@@ -3,38 +3,40 @@ import sites from "../sites.json";
 
 export default function Home() {
   const [status, setStatus] = useState("Checking available sites...");
-  const [currentSite, setCurrentSite] = useState<string | null>(null);
 
   useEffect(() => {
-    (async () => {
+    const checkSites = async () => {
       for (const site of sites) {
-        setCurrentSite(site); // show which site is being checked
         try {
-          const res = await fetch(`/api/check?url=${encodeURIComponent(site)}`);
-          const { ok } = await res.json();
+          // Try to load favicon (works around CORS restrictions)
+          const img = new Image();
+          img.src = site + "/favicon.ico?" + Date.now(); // timestamp busts cache
 
-          if (ok) {
-            setStatus(`✅ Found working site: ${site}`);
-            // Redirect after short delay so user sees result
-            setTimeout(() => {
-              window.location.href = site;
-            }, 1500);
-            return;
-          }
-        } catch {
-          // ignore errors and continue
+          await new Promise<void>((resolve, reject) => {
+            img.onload = () => resolve();
+            img.onerror = () => reject(new Error("Blocked or not reachable"));
+            setTimeout(() => reject(new Error("Timeout")), 3000); // 3s timeout
+          });
+
+          // ✅ This redirect now reflects *your network*, not Vercel's
+          setStatus(`Redirecting to ${site}...`);
+          window.location.href = site;
+          return;
+        } catch (err) {
+          console.warn(`Site failed: ${site}`, err);
+          continue;
         }
       }
-      setCurrentSite(null);
-      setStatus("❌ No site available on this network.");
-    })();
+
+      setStatus("No available sites were found on your network.");
+    };
+
+    checkSites();
   }, []);
 
   return (
-    <div style={{ textAlign: "center", padding: "2rem" }}>
-      <h1>🎬 Movie Redirector</h1>
+    <div className="h-screen flex items-center justify-center">
       <p>{status}</p>
-      {currentSite && <p>🔍 Currently checking: {currentSite}</p>}
     </div>
   );
 }
