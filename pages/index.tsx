@@ -8,9 +8,10 @@ export default function Home() {
     const checkSites = async () => {
       for (const site of sites) {
         try {
-          // Try to load favicon (works around CORS restrictions)
+          setStatus(`Checking: ${site} ...`);
+
           const img = new Image();
-          img.src = site + "/favicon.ico?" + Date.now(); // timestamp busts cache
+          img.src = site + "/favicon.ico?" + Date.now(); // avoid cache
 
           await new Promise<void>((resolve, reject) => {
             img.onload = () => resolve();
@@ -18,17 +19,17 @@ export default function Home() {
             setTimeout(() => reject(new Error("Timeout")), 3000); // 3s timeout
           });
 
-          // ✅ This redirect now reflects *your network*, not Vercel's
-          setStatus(`Redirecting to ${site}...`);
+          // ✅ Success → redirect
+          setStatus(`✅ Found working site: ${site}. Redirecting...`);
           window.location.href = site;
           return;
         } catch (err) {
           console.warn(`Site failed: ${site}`, err);
-          continue;
+          // move on to the next site
         }
       }
 
-      setStatus("No available sites were found on your network.");
+      setStatus("❌ No available sites were found on your network.");
     };
 
     checkSites();
