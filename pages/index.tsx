@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import sites from "../sites.json";
 
 export default function Home() {
@@ -6,6 +6,9 @@ export default function Home() {
   const [workingSites, setWorkingSites] = useState<string[]>([]);
   const [showOptions, setShowOptions] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [countdown, setCountdown] = useState(15);
+
+  const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const checkSite = (site: string): Promise<boolean> => {
     return new Promise((resolve) => {
@@ -73,25 +76,39 @@ export default function Home() {
         return;
       }
 
-      let countdown = 15;
-      const interval = setInterval(() => {
-        if (countdown > 0) {
-          setStatus(
-            `Redirecting to ${available[0]} in ${countdown}s... (Found ${available.length} working site${
-              available.length > 1 ? "s" : ""
-            })`
-          );
-          countdown--;
-        } else {
-          clearInterval(interval);
-          if (!showOptions) {
-            window.location.href = available[0];
+      // Reset countdown
+      setCountdown(15);
+
+      // Clear previous interval if any
+      if (intervalRef.current) clearInterval(intervalRef.current);
+
+      intervalRef.current = setInterval(() => {
+        setCountdown((prev) => {
+          if (prev <= 1) {
+            clearInterval(intervalRef.current!);
+            if (!showOptions) {
+              window.location.href = available[0];
+            }
+            return 0;
           }
-        }
+          return prev - 1;
+        });
       }, 1000);
     };
 
     checkAllSites();
+
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    // If user clicks "Show other sites", stop auto-redirect
+    if (showOptions && intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
   }, [showOptions]);
 
   const getSiteName = (url: string) => {
@@ -105,7 +122,12 @@ export default function Home() {
   return (
     <div className="h-screen w-screen flex flex-col items-center justify-center bg-black text-white p-6">
       <div className="flex flex-col items-center gap-6 w-full max-w-4xl">
-        <p className="text-lg font-medium">{status}</p>
+        <p className="text-lg font-medium">
+          {workingSites.length > 0 && countdown > 0 && !showOptions
+            ? `Redirecting to ${workingSites[0]} in ${countdown}s... (Found ${workingSites.length} working site${workingSites.length > 1 ? "s" : ""
+              })`
+            : status}
+        </p>
 
         {progress < sites.length && (
           <p className="text-sm text-gray-400">
