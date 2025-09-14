@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import sites from "../sites.json";
+import { track } from "@vercel/analytics";
 
 export default function Home() {
   const [status, setStatus] = useState("Checking available sites...");
@@ -19,16 +20,7 @@ export default function Home() {
 
       img.onload = () => {
         clearTimeout(timer);
-        if (
-          img.width > 0 &&
-          img.width <= 128 &&
-          img.height > 0 &&
-          img.height <= 128
-        ) {
-          resolve(true);
-        } else {
-          resolve(false);
-        }
+        resolve(true); // favicon loaded → assume working
       };
 
       img.onerror = () => {
@@ -47,24 +39,7 @@ export default function Home() {
         sites.map(async (site) => {
           const ok = await checkSite(site);
           setProgress((prev) => prev + 1);
-
-          if (!ok) return null;
-
-          try {
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 3000);
-
-            await fetch(site + "/robots.txt", {
-              method: "GET",
-              mode: "no-cors",
-              signal: controller.signal,
-            });
-
-            clearTimeout(timeout);
-            return site;
-          } catch {
-            return null;
-          }
+          return ok ? site : null;
         })
       );
 
@@ -79,7 +54,6 @@ export default function Home() {
       // Reset countdown
       setCountdown(15);
 
-      // Clear previous interval if any
       if (intervalRef.current) clearInterval(intervalRef.current);
 
       intervalRef.current = setInterval(() => {
@@ -87,6 +61,7 @@ export default function Home() {
           if (prev <= 1) {
             clearInterval(intervalRef.current!);
             if (!showOptions) {
+              track("auto_redirect", { site: available[0] }); // 👈 log event
               window.location.href = available[0];
             }
             return 0;
@@ -104,7 +79,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    // If user clicks "Show other sites", stop auto-redirect
+    // If user opens options, stop auto redirect
     if (showOptions && intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
@@ -137,7 +112,10 @@ export default function Home() {
 
         {workingSites.length > 1 && (
           <button
-            onClick={() => setShowOptions(!showOptions)}
+            onClick={() => {
+              track("show_other_sites"); // 👈 log event
+              setShowOptions(!showOptions);
+            }}
             className="px-4 py-2 rounded-lg bg-gray-700 text-white hover:bg-gray-800"
           >
             {showOptions ? "Hide other sites" : "Show other working sites"}
@@ -168,7 +146,10 @@ export default function Home() {
                     </td>
                     <td className="border border-gray-600 px-6 py-3 text-center">
                       <button
-                        onClick={() => (window.location.href = site)}
+                        onClick={() => {
+                          track("manual_redirect", { site }); // 👈 log event
+                          window.location.href = site;
+                        }}
                         className="px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700"
                       >
                         Go
