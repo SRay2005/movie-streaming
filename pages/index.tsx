@@ -11,22 +11,41 @@ export default function Home() {
 
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  const checkSite = (site: string): Promise<boolean> => {
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.src = site + "/favicon.ico?" + Date.now();
+  const checkSite = async (url: string): Promise<boolean> => {
+    return new Promise(async (resolve) => {
+      let origin = url;
+      try {
+        origin = new URL(url).origin;
+      } catch (e) {
+        // ignore
+      }
 
-      const timer = setTimeout(() => resolve(false), 3000);
+      const timer = setTimeout(() => resolve(false), 5000);
 
-      img.onload = () => {
+      try {
+        // Strategy 1: The 'no-cors' fetch. 
+        // This fails only on network errors (e.g. DNS block, connection reset, SSL failure)
+        // which perfectly catches college network blocks. Cloudflare 403 or 503 will still succeed here.
+        const controller = new AbortController();
+        const fetchTimer = setTimeout(() => controller.abort(), 4000);
+        await fetch(origin, { mode: "no-cors", signal: controller.signal });
+        clearTimeout(fetchTimer);
         clearTimeout(timer);
-        resolve(true); // favicon loaded → assume working
-      };
-
-      img.onerror = () => {
-        clearTimeout(timer);
-        resolve(false);
-      };
+        return resolve(true);
+      } catch (e) {
+        // Strategy 2: Fallback to favicon in case the fetch above fails for unexpected reasons 
+        // (though network errors will fail both)
+        const img = new Image();
+        img.src = `${origin}/favicon.ico?${Date.now()}`;
+        img.onload = () => {
+          clearTimeout(timer);
+          resolve(true);
+        };
+        img.onerror = () => {
+          clearTimeout(timer);
+          resolve(false);
+        };
+      }
     });
   };
 
