@@ -12,41 +12,19 @@ export default function Home() {
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const checkSite = async (url: string): Promise<boolean> => {
-    return new Promise(async (resolve) => {
-      let origin = url;
-      try {
-        origin = new URL(url).origin;
-      } catch (e) {
-        // ignore
-      }
-
-      const timer = setTimeout(() => resolve(false), 5000);
-
-      try {
-        // Strategy 1: The 'no-cors' fetch. 
-        // This fails only on network errors (e.g. DNS block, connection reset, SSL failure)
-        // which perfectly catches college network blocks. Cloudflare 403 or 503 will still succeed here.
-        const controller = new AbortController();
-        const fetchTimer = setTimeout(() => controller.abort(), 4000);
-        await fetch(origin, { mode: "no-cors", signal: controller.signal });
-        clearTimeout(fetchTimer);
-        clearTimeout(timer);
-        return resolve(true);
-      } catch (e) {
-        // Strategy 2: Fallback to favicon in case the fetch above fails for unexpected reasons 
-        // (though network errors will fail both)
-        const img = new Image();
-        img.src = `${origin}/favicon.ico?${Date.now()}`;
-        img.onload = () => {
-          clearTimeout(timer);
-          resolve(true);
-        };
-        img.onerror = () => {
-          clearTimeout(timer);
-          resolve(false);
-        };
-      }
-    });
+    try {
+      // Call our server-side API route, which can read the response body
+      // and detect Fortinet/firewall block pages (the browser can't do this with no-cors)
+      const res = await fetch(
+        `/api/check?url=${encodeURIComponent(url)}`,
+        { signal: AbortSignal.timeout(10000) }
+      );
+      if (!res.ok) return false;
+      const data = await res.json();
+      return data.working === true;
+    } catch {
+      return false;
+    }
   };
 
   useEffect(() => {
