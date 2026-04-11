@@ -2,7 +2,7 @@ import type { NextApiRequest, NextApiResponse } from "next";
 
 // Known block page fingerprints from common campus/enterprise firewalls
 const BLOCK_SIGNATURES = [
-  // Fortinet FortiGuard (what your college uses)
+  // Fortinet FortiGuard
   "high security alert",
   "fortinet",
   "forticlient",
@@ -23,7 +23,7 @@ const BLOCK_SIGNATURES = [
   // Palo Alto
   "palo alto networks",
   "pan-db",
-  // Generic captive portal / block pages
+  // Generic block pages
   "access denied",
   "this site is blocked",
   "website blocked",
@@ -33,6 +33,65 @@ const BLOCK_SIGNATURES = [
   "request rejected",
   "your request has been blocked",
 ];
+
+// Firewall domains that Fortinet / others redirect the browser to
+const FIREWALL_REDIRECT_DOMAINS = [
+  "fortinet",
+  "fortigate",
+  "fortiguard",
+  "umbrella.cisco",
+  "zscaler",
+  "barracuda",
+  "safebrowsing",
+  "phishtank",
+  "mcafee",
+  "webroot",
+];
+
+/** Read up to `maxBytes` from a ReadableStream, returned as a lowercase string */
+async function readBodyUpTo(
+  body: ReadableStream<Uint8Array>,
+  maxBytes = 51200 // 50 KB — more than enough for any block page
+): Promise<string> {
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalRead = 0;
+
+  try {
+    while (totalRead < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done || !value) break;
+      chunks.push(value);
+      totalRead += value.byteLength;
+    }
+  } finally {
+    reader.cancel().catch(() => {}); // Release the lock regardless
+  }
+
+  const merged = new Uint8Array(totalRead);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return new TextDecoder().decode(merged).toLowerCase();
+}
+
+/** Extract the root domain (e.g. "vidjoy.pro") from a URL string */
+function rootDomain(url: string): string {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    // Strip leading "www." or "ww38." style prefixes
+    const parts = host.split(".");
+    if (parts.length >= 2) {
+      return parts.slice(-2).join(".");
+    }
+    return host;
+  } catch {
+    return "";
+  }
+}
 
 export default async function handler(
   req: NextApiRequest,
@@ -45,21 +104,23 @@ export default async function handler(
   }
 
   let origin: string;
+  let requestedRootDomain: string;
   try {
-    origin = new URL(url).origin;
+    const parsed = new URL(url);
+    origin = parsed.origin;
+    requestedRootDomain = rootDomain(url);
   } catch {
     return res.status(400).json({ error: "Invalid URL" });
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 7000);
+  const timeout = setTimeout(() => controller.abort(), 9000);
 
   try {
     const response = await fetch(origin, {
       signal: controller.signal,
       redirect: "follow",
       headers: {
-        // Mimic a real browser to avoid sites rejecting bot-like requests
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         Accept:
@@ -70,48 +131,55 @@ export default async function handler(
 
     clearTimeout(timeout);
 
-    // Read a chunk of the response body (first 8KB is enough to fingerprint block pages)
-    const reader = response.body?.getReader();
-    let bodyChunk = "";
-    if (reader) {
-      const { value } = await reader.read();
-      reader.cancel(); // Don't need the rest
-      if (value) {
-        bodyChunk = new TextDecoder().decode(value).toLowerCase();
-      }
+    // ── 1. Read up to 50KB of the response body ────────────────────────────
+    let body = "";
+    if (response.body) {
+      body = await readBodyUpTo(response.body, 51200);
     }
 
-    // Check if the response body matches any known block page signature
-    const isBlocked = BLOCK_SIGNATURES.some((sig) =>
-      bodyChunk.includes(sig.toLowerCase())
+    // ── 2. Block page fingerprinting ───────────────────────────────────────
+    const isBlockPage = BLOCK_SIGNATURES.some((sig) =>
+      body.includes(sig.toLowerCase())
     );
 
-    // Also check final URL after redirects — Fortinet often redirects to its own domain
+    // ── 3. Firewall redirect domain check ──────────────────────────────────
     const finalUrl = response.url || origin;
-    const isRedirectedToFirewall =
-      finalUrl.includes("fortinet") ||
-      finalUrl.includes("fortigate") ||
-      finalUrl.includes("umbrella.cisco") ||
-      finalUrl.includes("zscaler") ||
-      finalUrl.includes("barracuda");
+    const isFirewallRedirect = FIREWALL_REDIRECT_DOMAINS.some((fw) =>
+      finalUrl.toLowerCase().includes(fw)
+    );
 
-    const working = response.ok && !isBlocked && !isRedirectedToFirewall;
+    // ── 4. Domain hijacking / redirect chain check ─────────────────────────
+    // If the final URL's root domain is completely different from what we
+    // requested, the site redirected us somewhere else (parking page, ad page,
+    // or a Fortinet-like interception subdomain).  Mark it as broken.
+    const finalRootDomain = rootDomain(finalUrl);
+    const domainMismatch =
+      finalRootDomain !== "" &&
+      requestedRootDomain !== "" &&
+      finalRootDomain !== requestedRootDomain;
+
+    const working =
+      response.ok && !isBlockPage && !isFirewallRedirect && !domainMismatch;
 
     return res.status(200).json({
       working,
-      // Helpful debug info (remove in production if you want)
       debug: {
-        status: response.status,
+        requestedOrigin: origin,
+        requestedRootDomain,
         finalUrl,
-        isBlocked,
-        isRedirectedToFirewall,
+        finalRootDomain,
+        status: response.status,
+        isBlockPage,
+        isFirewallRedirect,
+        domainMismatch,
+        // Uncomment the line below temporarily if you want to see what the
+        // first 500 characters of the response look like:
+        // bodyPreview: body.slice(0, 500),
       },
     });
   } catch (err: unknown) {
     clearTimeout(timeout);
-
-    // Network error = site is unreachable (DNS block, TCP reset, SSL failure, timeout)
-    // This is a genuine block
+    // Network error = DNS block, TCP reset, SSL failure, or timeout
     return res.status(200).json({
       working: false,
       debug: { error: err instanceof Error ? err.message : String(err) },
