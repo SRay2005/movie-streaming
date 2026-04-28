@@ -11,23 +11,20 @@ export default function Home() {
 
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  const checkSite = (site: string): Promise<boolean> => {
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.src = site + "/favicon.ico?" + Date.now();
-
-      const timer = setTimeout(() => resolve(false), 3000);
-
-      img.onload = () => {
-        clearTimeout(timer);
-        resolve(true); // favicon loaded → assume working
-      };
-
-      img.onerror = () => {
-        clearTimeout(timer);
-        resolve(false);
-      };
-    });
+  const checkSite = async (url: string): Promise<boolean> => {
+    try {
+      // Call our server-side API route, which can read the response body
+      // and detect Fortinet/firewall block pages (the browser can't do this with no-cors)
+      const res = await fetch(
+        `/api/check?url=${encodeURIComponent(url)}`,
+        { signal: AbortSignal.timeout(10000) }
+      );
+      if (!res.ok) return false;
+      const data = await res.json();
+      return data.working === true;
+    } catch {
+      return false;
+    }
   };
 
   useEffect(() => {
