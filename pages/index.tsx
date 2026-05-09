@@ -1,35 +1,68 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import sites from "../sites.json";
 import { track } from "@vercel/analytics";
+import styles from "./index.module.css";
+
+type SiteRating = { up: number; down: number };
+type Ratings = Record<string, SiteRating>;
+
+// Score = upvotes - downvotes, used to rank sites
+function score(r: SiteRating | undefined): number {
+  if (!r) return 0;
+  return (r.up ?? 0) - (r.down ?? 0);
+}
+
+function getSiteName(url: string) {
+  try {
+    return new URL(url).hostname.replace("www.", "");
+  } catch {
+    return url;
+  }
+}
 
 export default function Home() {
-  const [status, setStatus] = useState("Checking available sites...");
+  const [status, setStatus] = useState("Scanning available sites…");
   const [workingSites, setWorkingSites] = useState<string[]>([]);
   const [showOptions, setShowOptions] = useState(false);
   const [progress, setProgress] = useState(0);
   const [countdown, setCountdown] = useState(15);
+  const [ratings, setRatings] = useState<Ratings>({});
+  const [votedSites, setVotedSites] = useState<Record<string, "up" | "down">>({});
+  const [done, setDone] = useState(false);
 
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Fetch all ratings once on mount
+  useEffect(() => {
+    fetch("/api/ratings")
+      .then((r) => r.json())
+      .then((data: Ratings) => setRatings(data))
+      .catch(() => {});
+  }, []);
+
   const checkSite = async (url: string): Promise<boolean> => {
     try {
-      // Call our server-side API route, which can read the response body
-      // and detect Fortinet/firewall block pages (the browser can't do this with no-cors)
-      const res = await fetch(
-        `/api/check?url=${encodeURIComponent(url)}`,
-        { signal: AbortSignal.timeout(10000) }
-      );
-      if (!res.ok) return false;
-      const data = await res.json();
-      return data.working === true;
+      // Fetch directly from the browser so the check goes through the user's
+      // actual network. Campus/enterprise firewalls (FortiGuard, Cisco Umbrella,
+      // etc.) intercept at the network layer: the SSL cert they serve won't
+      // match the requested domain, causing a hard network error here.
+      // mode:'no-cors' lets us attempt the request without CORS restrictions;
+      // an opaque success response means the site is reachable.
+      const res = await fetch(url, {
+        mode: "no-cors",
+        signal: AbortSignal.timeout(10000),
+      });
+      // opaque or basic response = site responded = not blocked
+      return res.type === "opaque" || res.type === "basic" || res.ok;
     } catch {
+      // Network error, SSL failure, timeout, or DNS block = site is unreachable
       return false;
     }
   };
 
   useEffect(() => {
     const checkAllSites = async () => {
-      setStatus("Checking available sites...");
+      setStatus("Scanning available sites…");
       setProgress(0);
 
       const results = await Promise.all(
@@ -42,13 +75,14 @@ export default function Home() {
 
       const available = results.filter((s): s is string => s !== null);
       setWorkingSites(available);
+      setDone(true);
 
       if (available.length === 0) {
         setStatus("No available sites were found on your network.");
         return;
       }
 
-      // Reset countdown
+      setStatus(`Found ${available.length} working site${available.length > 1 ? "s" : ""}.`);
       setCountdown(15);
 
       if (intervalRef.current) clearInterval(intervalRef.current);
@@ -57,10 +91,18 @@ export default function Home() {
         setCountdown((prev) => {
           if (prev <= 1) {
             clearInterval(intervalRef.current!);
-            if (!showOptions) {
-              track("auto_redirect", { site: available[0] }); // 👈 log event
-              window.location.href = available[0];
-            }
+            // Redirect to best-rated working site
+            setRatings((currentRatings) => {
+              const sorted = [...available].sort(
+                (a, b) => score(currentRatings[b]) - score(currentRatings[a])
+              );
+              const best = sorted[0];
+              if (!showOptions) {
+                track("auto_redirect", { site: best });
+                window.location.href = best;
+              }
+              return currentRatings;
+            });
             return 0;
           }
           return prev - 1;
@@ -69,91 +111,236 @@ export default function Home() {
     };
 
     checkAllSites();
-
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
   }, []);
 
   useEffect(() => {
-    // If user opens options, stop auto redirect
     if (showOptions && intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
   }, [showOptions]);
 
-  const getSiteName = (url: string) => {
-    try {
-      return new URL(url).hostname.replace("www.", "");
-    } catch {
-      return url;
-    }
-  };
+  const handleVote = useCallback(
+    async (site: string, vote: "up" | "down") => {
+      // Optimistic update
+      setRatings((prev) => {
+        const existing = prev[site] ?? { up: 0, down: 0 };
+        const prevVote = votedSites[site];
+        const updated = { ...existing };
+
+        // If already voted the same way, undo the vote
+        if (prevVote === vote) {
+          updated[vote] = Math.max(0, (updated[vote] ?? 0) - 1);
+          setVotedSites((v) => {
+            const next = { ...v };
+            delete next[site];
+            return next;
+          });
+        } else {
+          // Remove opposite vote if existed
+          if (prevVote) {
+            updated[prevVote] = Math.max(0, (updated[prevVote] ?? 0) - 1);
+          }
+          updated[vote] = (updated[vote] ?? 0) + 1;
+          setVotedSites((v) => ({ ...v, [site]: vote }));
+        }
+        return { ...prev, [site]: updated };
+      });
+
+      // Persist to server
+      try {
+        await fetch("/api/ratings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ site, vote }),
+        });
+      } catch {
+        // silent
+      }
+    },
+    [votedSites]
+  );
+
+  // Sorted working sites by rating score (highest first)
+  const sortedWorkingSites = [...workingSites].sort(
+    (a, b) => score(ratings[b]) - score(ratings[a])
+  );
+
+  const bestSite = sortedWorkingSites[0];
+
+  const progressPct = sites.length > 0 ? (progress / sites.length) * 100 : 0;
 
   return (
-    <div className="h-screen w-screen flex flex-col items-center justify-center bg-black text-white p-6">
-      <div className="flex flex-col items-center gap-6 w-full max-w-4xl">
-        <p className="text-lg font-medium">
-          {workingSites.length > 0 && countdown > 0 && !showOptions
-            ? `Redirecting to ${workingSites[0]} in ${countdown}s... (Found ${workingSites.length} working site${workingSites.length > 1 ? "s" : ""
-              })`
-            : status}
-        </p>
+    <div className={styles.page}>
+      {/* Background glow orbs */}
+      <div className={styles.orb1} />
+      <div className={styles.orb2} />
 
-        {progress < sites.length && (
-          <p className="text-sm text-gray-400">
-            Checked {progress} of {sites.length} sites...
-          </p>
+      <div className={styles.container}>
+        {/* Header */}
+        <div className={styles.header}>
+          <div className={styles.logo}>
+            <span className={styles.logoIcon}>▶</span>
+            <span className={styles.logoText}>StreamFinder</span>
+          </div>
+          <p className={styles.tagline}>Finding the best streaming sites on your network</p>
+        </div>
+
+        {/* Status card */}
+        <div className={styles.statusCard}>
+          {!done ? (
+            <>
+              <div className={styles.scanningRow}>
+                <span className={styles.pulsingDot} />
+                <span className={styles.statusText}>{status}</span>
+              </div>
+              <div className={styles.progressBar}>
+                <div
+                  className={styles.progressFill}
+                  style={{ width: `${progressPct}%` }}
+                />
+              </div>
+              <p className={styles.progressLabel}>
+                {progress} / {sites.length} sites checked
+              </p>
+            </>
+          ) : (
+            <>
+              {workingSites.length > 0 ? (
+                <div className={styles.doneRow}>
+                  <span className={styles.checkmark}>✓</span>
+                  <div>
+                    <p className={styles.doneTitle}>{status}</p>
+                    {countdown > 0 && !showOptions && (
+                      <p className={styles.countdownText}>
+                        Redirecting to{" "}
+                        <span className={styles.siteHighlight}>
+                          {getSiteName(bestSite)}
+                        </span>{" "}
+                        in <span className={styles.siteHighlight}>{countdown}s</span>…
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className={styles.doneRow}>
+                  <span className={styles.xmark}>✗</span>
+                  <p className={styles.doneTitle}>{status}</p>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Action buttons */}
+        {done && workingSites.length > 0 && (
+          <div className={styles.actions}>
+            <button
+              className={styles.primaryBtn}
+              onClick={() => {
+                track("manual_redirect", { site: bestSite });
+                window.location.href = bestSite;
+              }}
+            >
+              <span>Go to {getSiteName(bestSite)}</span>
+              <span className={styles.btnIcon}>→</span>
+            </button>
+
+            {workingSites.length > 1 && (
+              <button
+                className={styles.secondaryBtn}
+                onClick={() => {
+                  track("show_other_sites");
+                  setShowOptions((v) => !v);
+                }}
+              >
+                {showOptions ? "Hide list" : `See all ${workingSites.length} sites`}
+              </button>
+            )}
+          </div>
         )}
 
-        {workingSites.length > 1 && (
-          <button
-            onClick={() => {
-              track("show_other_sites"); // 👈 log event
-              setShowOptions(!showOptions);
-            }}
-            className="px-4 py-2 rounded-lg bg-gray-700 text-white hover:bg-gray-800"
-          >
-            {showOptions ? "Hide other sites" : "Show other working sites"}
-          </button>
-        )}
-
-        {showOptions && (
-          <div className="w-full flex justify-center">
-            <table className="table-auto border-collapse border border-gray-600 w-full max-w-2xl rounded-lg overflow-hidden shadow-lg">
+        {/* Sites table */}
+        {showOptions && sortedWorkingSites.length > 0 && (
+          <div className={styles.tableWrapper}>
+            <table className={styles.table}>
               <thead>
-                <tr className="bg-gray-800 text-white">
-                  <th className="border border-gray-600 px-6 py-3 text-left">
-                    Site
-                  </th>
-                  <th className="border border-gray-600 px-6 py-3 text-center">
-                    Action
-                  </th>
+                <tr>
+                  <th className={styles.thRank}>#</th>
+                  <th className={styles.thSite}>Site</th>
+                  <th className={styles.thScore}>Score</th>
+                  <th className={styles.thVotes}>Rate</th>
+                  <th className={styles.thAction}>Go</th>
                 </tr>
               </thead>
               <tbody>
-                {workingSites.map((site) => (
-                  <tr
-                    key={site}
-                    className="bg-gray-900 text-gray-200 hover:bg-gray-700"
-                  >
-                    <td className="border border-gray-600 px-6 py-3">
-                      {getSiteName(site)}
-                    </td>
-                    <td className="border border-gray-600 px-6 py-3 text-center">
-                      <button
-                        onClick={() => {
-                          track("manual_redirect", { site }); // 👈 log event
-                          window.location.href = site;
-                        }}
-                        className="px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700"
-                      >
-                        Go
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {sortedWorkingSites.map((site, i) => {
+                  const r = ratings[site] ?? { up: 0, down: 0 };
+                  const s = score(r);
+                  const userVote = votedSites[site];
+                  return (
+                    <tr key={site} className={styles.tableRow}>
+                      <td className={styles.tdRank}>
+                        {i === 0 ? (
+                          <span className={styles.crownBadge}>👑</span>
+                        ) : (
+                          <span className={styles.rankNum}>{i + 1}</span>
+                        )}
+                      </td>
+                      <td className={styles.tdSite}>
+                        <span className={styles.siteName}>{getSiteName(site)}</span>
+                        <span className={styles.siteUrl}>{site}</span>
+                      </td>
+                      <td className={styles.tdScore}>
+                        <span
+                          className={
+                            s > 0
+                              ? styles.scorePositive
+                              : s < 0
+                              ? styles.scoreNegative
+                              : styles.scoreNeutral
+                          }
+                        >
+                          {s > 0 ? "+" : ""}{s}
+                        </span>
+                      </td>
+                      <td className={styles.tdVotes}>
+                        <div className={styles.voteGroup}>
+                          <button
+                            className={`${styles.voteBtn} ${styles.upvoteBtn} ${userVote === "up" ? styles.votedUp : ""}`}
+                            onClick={() => handleVote(site, "up")}
+                            title="Upvote"
+                          >
+                            ▲
+                            <span className={styles.voteCount}>{r.up}</span>
+                          </button>
+                          <button
+                            className={`${styles.voteBtn} ${styles.downvoteBtn} ${userVote === "down" ? styles.votedDown : ""}`}
+                            onClick={() => handleVote(site, "down")}
+                            title="Downvote"
+                          >
+                            ▼
+                            <span className={styles.voteCount}>{r.down}</span>
+                          </button>
+                        </div>
+                      </td>
+                      <td className={styles.tdAction}>
+                        <button
+                          className={styles.goBtn}
+                          onClick={() => {
+                            track("manual_redirect", { site });
+                            window.location.href = site;
+                          }}
+                        >
+                          Visit →
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
