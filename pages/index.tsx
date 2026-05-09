@@ -37,7 +37,7 @@ export default function Home() {
     fetch("/api/ratings")
       .then((r) => r.json())
       .then((data: Ratings) => setRatings(data))
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   const checkSite = async (url: string): Promise<boolean> => {
@@ -317,8 +317,8 @@ export default function Home() {
                             s > 0
                               ? styles.scorePositive
                               : s < 0
-                              ? styles.scoreNegative
-                              : styles.scoreNeutral
+                                ? styles.scoreNegative
+                                : styles.scoreNeutral
                           }
                         >
                           {s > 0 ? "+" : ""}{s}

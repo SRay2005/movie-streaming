@@ -69,7 +69,7 @@ async function readBodyUpTo(
       totalRead += value.byteLength;
     }
   } finally {
-    reader.cancel().catch(() => {}); // Release the lock regardless
+    reader.cancel().catch(() => { }); // Release the lock regardless
   }
 
   const merged = new Uint8Array(totalRead);
