@@ -42,19 +42,20 @@ export default function Home() {
 
   const checkSite = async (url: string): Promise<boolean> => {
     // ── Stage 1: Client-side reachability check ──────────────────────────────
-    // Runs in the browser, goes through the user's actual network/firewall.
-    // redirect:'manual' catches FortiGuard HTTP redirects (opaqueredirect).
-    // SSL cert mismatches / DNS blocks / TCP resets throw a network error.
+    // Runs in the browser, going through the user's actual network/firewall.
+    // Catches: SSL cert mismatches (FortiGuard intercept), TCP resets,
+    // DNS blocks, and timeouts — all throw a network error in fetch.
+    // redirect:'follow' is intentional: legitimate streaming sites often
+    // redirect (http→https, /→/home, non-www→www). redirect:'manual' was
+    // treating every such redirect as a firewall block, finding no sites.
     try {
       const res = await fetch(url, {
         mode: "no-cors",
-        redirect: "manual",
+        redirect: "follow",
         signal: AbortSignal.timeout(8000),
       });
-      // opaqueredirect = firewall intercepted and redirected us → blocked
-      if (res.type === "opaqueredirect") return false;
-      // type:'error' (status 0, not opaque) should also be treated as blocked
-      if (res.type !== "opaque" && res.type !== "basic") return false;
+      // Any response type other than opaque/basic means something went wrong
+      if (res.type !== "opaque" && res.type !== "basic" && !res.ok) return false;
     } catch {
       // Network error, SSL failure, TCP reset, timeout → blocked
       return false;
