@@ -41,40 +41,44 @@ export default function Home() {
   }, []);
 
   const checkSite = async (url: string): Promise<boolean> => {
+    const name = getSiteName(url);
+
     // ── Stage 1: Client-side reachability check ──────────────────────────────
-    // Runs in the browser, going through the user's actual network/firewall.
-    // Catches: SSL cert mismatches (FortiGuard intercept), TCP resets,
-    // DNS blocks, and timeouts — all throw a network error in fetch.
-    // redirect:'follow' is intentional: legitimate streaming sites often
-    // redirect (http→https, /→/home, non-www→www). redirect:'manual' was
-    // treating every such redirect as a firewall block, finding no sites.
+    // Runs in the browser through the user's actual network/firewall.
+    // Catches: SSL cert mismatches, TCP resets, DNS blocks, timeouts.
     try {
       const res = await fetch(url, {
         mode: "no-cors",
         redirect: "follow",
         signal: AbortSignal.timeout(8000),
       });
-      // Any response type other than opaque/basic means something went wrong
-      if (res.type !== "opaque" && res.type !== "basic" && !res.ok) return false;
-    } catch {
-      // Network error, SSL failure, TCP reset, timeout → blocked
+      console.log(`[Stage1] ${name} → type=${res.type} status=${res.status}`);
+      if (res.type !== "opaque" && res.type !== "basic" && !res.ok) {
+        console.log(`[Stage1] ${name} ✗ bad response type`);
+        return false;
+      }
+    } catch (err) {
+      console.log(`[Stage1] ${name} ✗ network error:`, err);
       return false;
     }
 
     // ── Stage 2: Server-side body check ──────────────────────────────────────
-    // Only reached if Stage 1 passed (site is reachable on user's network).
-    // The server reads the actual HTML body to catch functionally dead sites:
-    // "deployment temporarily paused", known block-page fingerprints, etc.
+    // Catches dead/paused sites, block-page fingerprints in body content.
     try {
       const res = await fetch(`/api/check?url=${encodeURIComponent(url)}`, {
         signal: AbortSignal.timeout(12000),
       });
-      if (!res.ok) return false;
+      if (!res.ok) {
+        console.log(`[Stage2] ${name} ✗ API returned ${res.status}`);
+        return false;
+      }
       const data = await res.json();
+      console.log(`[Stage2] ${name} →`, data);
       return data.working === true;
-    } catch {
-      // If the API itself fails, fall back to trusting Stage 1
-      return true;
+    } catch (err) {
+      console.log(`[Stage2] ${name} ✗ API error:`, err);
+      // API failure = be conservative and mark as not working
+      return false;
     }
   };
 

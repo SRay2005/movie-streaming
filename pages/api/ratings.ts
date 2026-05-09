@@ -1,42 +1,31 @@
 import type { NextApiRequest, NextApiResponse } from "next";
-import fs from "fs";
-import path from "path";
+import { Redis } from "@upstash/redis";
 
-// Store ratings in a JSON file in the project's tmp dir (persists across requests on one server instance)
-// On Vercel this resets between cold starts — for persistent cross-user ratings you'd want a DB or KV store.
-// The file lives at the project root so it survives hot-reloads in dev.
-const RATINGS_FILE = path.join(process.cwd(), "ratings.json");
+// Upstash Redis — free tier, persists across deployments and cold starts.
+// Env vars UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN are read
+// automatically from .env.local (dev) or Vercel environment variables (prod).
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL!,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+});
 
-type Ratings = Record<string, { up: number; down: number }>;
+const RATINGS_KEY = "site_ratings";
 
-function readRatings(): Ratings {
-  try {
-    if (fs.existsSync(RATINGS_FILE)) {
-      return JSON.parse(fs.readFileSync(RATINGS_FILE, "utf-8")) as Ratings;
-    }
-  } catch {
-    // ignore parse errors — start fresh
-  }
-  return {};
-}
+type SiteRating = { up: number; down: number };
+type Ratings = Record<string, SiteRating>;
 
-function writeRatings(data: Ratings) {
-  try {
-    fs.writeFileSync(RATINGS_FILE, JSON.stringify(data, null, 2), "utf-8");
-  } catch {
-    // ignore write errors (e.g. read-only FS on Vercel — ratings will just be in-memory)
-  }
-}
-
-// In-memory fallback for environments where FS writes fail (Vercel Edge etc.)
-let memoryStore: Ratings = readRatings();
-
-export default function handler(req: NextApiRequest, res: NextApiResponse) {
+export default async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse
+) {
   if (req.method === "GET") {
-    // Return all ratings
-    const data = readRatings();
-    memoryStore = data;
-    return res.status(200).json(data);
+    try {
+      const data = (await redis.get<Ratings>(RATINGS_KEY)) ?? {};
+      return res.status(200).json(data);
+    } catch (err) {
+      console.error("Redis GET error:", err);
+      return res.status(500).json({ error: "Failed to read ratings" });
+    }
   }
 
   if (req.method === "POST") {
@@ -46,14 +35,18 @@ export default function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(400).json({ error: "Missing site or vote (up|down)" });
     }
 
-    const data = { ...memoryStore };
-    if (!data[site]) data[site] = { up: 0, down: 0 };
-    data[site][vote] = (data[site][vote] ?? 0) + 1;
+    try {
+      // Read current ratings, update, write back
+      const data = (await redis.get<Ratings>(RATINGS_KEY)) ?? {};
+      if (!data[site]) data[site] = { up: 0, down: 0 };
+      data[site][vote] = (data[site][vote] ?? 0) + 1;
 
-    memoryStore = data;
-    writeRatings(data);
-
-    return res.status(200).json(data[site]);
+      await redis.set(RATINGS_KEY, data);
+      return res.status(200).json(data[site]);
+    } catch (err) {
+      console.error("Redis POST error:", err);
+      return res.status(500).json({ error: "Failed to save rating" });
+    }
   }
 
   return res.status(405).json({ error: "Method not allowed" });
