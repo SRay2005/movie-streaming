@@ -153,14 +153,18 @@ export default async function handler(
     );
 
     // ── 4. Domain hijacking / redirect chain check ─────────────────────────
-    // If the final URL's root domain is completely different from what we
-    // requested, the site redirected us somewhere else (parking page, ad page,
-    // or a Fortinet-like interception subdomain).  Mark it as broken.
+    // Only flag a domain mismatch if the final URL landed on a known
+    // firewall/block domain. Legitimate streaming sites often migrate
+    // domains (e.g. bitcine.app → bitcine.net), so a blanket mismatch
+    // check causes false negatives.
     const finalRootDomain = rootDomain(finalUrl);
     const domainMismatch =
       finalRootDomain !== "" &&
       requestedRootDomain !== "" &&
-      finalRootDomain !== requestedRootDomain;
+      finalRootDomain !== requestedRootDomain &&
+      FIREWALL_REDIRECT_DOMAINS.some((fw) =>
+        finalUrl.toLowerCase().includes(fw)
+      );
 
     const working =
       response.ok && !isBlockPage && !isFirewallRedirect && !domainMismatch;
