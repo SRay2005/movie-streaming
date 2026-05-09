@@ -32,6 +32,10 @@ const BLOCK_SIGNATURES = [
   "internet access blocked",
   "request rejected",
   "your request has been blocked",
+  // Vercel / hosting provider paused/dead deployments
+  "this deployment is temporarily paused",
+  "deployment not found",
+  "this project is not deployed",
 ];
 
 // Firewall domains that Fortinet / others redirect the browser to

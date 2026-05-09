@@ -41,22 +41,39 @@ export default function Home() {
   }, []);
 
   const checkSite = async (url: string): Promise<boolean> => {
+    // ── Stage 1: Client-side reachability check ──────────────────────────────
+    // Runs in the browser, goes through the user's actual network/firewall.
+    // redirect:'manual' catches FortiGuard HTTP redirects (opaqueredirect).
+    // SSL cert mismatches / DNS blocks / TCP resets throw a network error.
     try {
-      // Fetch directly from the browser so the check goes through the user's
-      // actual network. Campus/enterprise firewalls (FortiGuard, Cisco Umbrella,
-      // etc.) intercept at the network layer: the SSL cert they serve won't
-      // match the requested domain, causing a hard network error here.
-      // mode:'no-cors' lets us attempt the request without CORS restrictions;
-      // an opaque success response means the site is reachable.
       const res = await fetch(url, {
         mode: "no-cors",
-        signal: AbortSignal.timeout(10000),
+        redirect: "manual",
+        signal: AbortSignal.timeout(8000),
       });
-      // opaque or basic response = site responded = not blocked
-      return res.type === "opaque" || res.type === "basic" || res.ok;
+      // opaqueredirect = firewall intercepted and redirected us → blocked
+      if (res.type === "opaqueredirect") return false;
+      // type:'error' (status 0, not opaque) should also be treated as blocked
+      if (res.type !== "opaque" && res.type !== "basic") return false;
     } catch {
-      // Network error, SSL failure, timeout, or DNS block = site is unreachable
+      // Network error, SSL failure, TCP reset, timeout → blocked
       return false;
+    }
+
+    // ── Stage 2: Server-side body check ──────────────────────────────────────
+    // Only reached if Stage 1 passed (site is reachable on user's network).
+    // The server reads the actual HTML body to catch functionally dead sites:
+    // "deployment temporarily paused", known block-page fingerprints, etc.
+    try {
+      const res = await fetch(`/api/check?url=${encodeURIComponent(url)}`, {
+        signal: AbortSignal.timeout(12000),
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      return data.working === true;
+    } catch {
+      // If the API itself fails, fall back to trusting Stage 1
+      return true;
     }
   };
 
